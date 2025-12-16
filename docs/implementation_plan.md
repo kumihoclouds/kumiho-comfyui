@@ -1,11 +1,11 @@
 # 🦊 Kumiho ComfyUI Nodes - Implementation Plan
 
-## Status: ✅ Phase 1-4 Complete
+## Status: ✅ Phase 1-6 Complete
 
-**Last Updated**: Implementation in progress
+**Last Updated**: January 2025
 
 ### Completed
-- ✅ Core node implementations (KumihoRegister, KumihoLoadAsset)
+- ✅ Core node implementations (KumihoRegister, KumihoLoadAsset, KumihoSaveImage, KumihoSaveVideo)
 - ✅ Workflow parser with dependency extraction
 - ✅ kref URI parsing and building utilities
 - ✅ Frontend JavaScript extension with sidebar panel
@@ -15,11 +15,16 @@
 - ✅ **Dropdown mode** for KumihoLoadAsset (browse projects/spaces/items)
 - ✅ **API endpoints** for dynamic catalog refresh (/kumiho/catalog/*)
 - ✅ **Frontend asset browser** with search and catalog integration
+- ✅ **KumihoSearchItems** - Search items using `kumiho.item_search()` with iterative output
+- ✅ **KumihoSaveImage/Video** - Optional `file_path` input for custom save locations
+- ✅ **Inline video preview** - Videos display in ComfyUI output panel
+- ✅ **Lineage tracking** - Automatic DERIVED_FROM edges between assets
+- ✅ **Python SDK v0.4.2** - Item.project, Item.space properties; Kref.get_project() method
 
 ### Remaining
-- ⏳ Actual API integration (requires backend connection)
-- ⏳ Image upload to Kumiho Cloud
 - ⏳ ComfyUI model loader wrappers (KumihoCheckpointLoader, etc.)
+- ⏳ Batch registration optimization
+- ⏳ Advanced caching strategies
 
 ---
 
@@ -526,13 +531,47 @@ Minimum Viable Product includes:
 - ✅ Lineage edge creation
 - ✅ Basic settings (API key)
 
-Post-MVP additions:
-- KumihoLoadAsset node
-- Full asset browser UI
-- All asset type support
-- Advanced caching
+Post-MVP additions (Now Complete):
+- ✅ KumihoLoadAsset node with dropdown and kref modes
+- ✅ KumihoSearchItems node with SDK integration
+- ✅ KumihoSaveImage/Video with optional file_path input
+- ✅ Full asset browser UI
+- ✅ Video preview support
+- ✅ Lineage visualization
+
+Still Planned:
+- ⏳ Model loader wrappers (KumihoCheckpointLoader, KumihoLoraLoader)
+- ⏳ Advanced caching and performance optimization
 
 ---
 
-*Last Updated: December 3, 2024*
-*Version: 1.0*
+## 📦 Recent Updates (v0.4.x)
+
+### v0.4.2 (January 2025)
+- **KumihoSearchItems improvements**:
+  - Now uses `kumiho.item_search()` SDK function
+  - Supports `item_name_filter`, `kind_filter`, and `context_filter`
+  - Returns iterative lists (krefs, file_paths) via OUTPUT_IS_LIST
+  - Skips items without valid artifacts to prevent downstream errors
+- **KumihoSaveImage/Video enhancements**:
+  - Added optional `file_path` input for custom save locations
+  - Description field changed from multiline to single-line input
+- **Python SDK v0.4.2**:
+  - `Item.project` and `Item.space` properties for easy access
+  - `Kref.get_project()` method to extract project from kref
+
+### v0.4.1
+- Fixed KumihoLoadAsset space duplication bug
+- Removed redundant project input field
+- Added `get_input_kind()` helper function
+- Improved kref URI handling
+
+### v0.4.0
+- Initial inline video preview support
+- Video playback in ComfyUI output panel
+- Lineage tracking with DERIVED_FROM edges
+
+---
+
+*Last Updated: January 2025*
+*Version: 1.2*

@@ -773,6 +773,151 @@ class WorkflowParser:
         
         return seeds
     
+    def extract_generation_settings(self) -> Dict[str, Any]:
+        """Extract generation settings from workflow nodes.
+        
+        Extracts prompt, negative prompt, model, LoRAs, steps, CFG, sampler, etc.
+        These are stored as revision metadata for the asset browser to display.
+        
+        Returns:
+            Dict with keys matching asset-browser's ItemMetadata:
+            - prompt: positive prompt text
+            - negative_prompt: negative prompt text  
+            - model: checkpoint/model name
+            - loras: comma-separated LoRA names
+            - seed: seed value (first found)
+            - steps: number of steps
+            - cfg: CFG scale
+            - sampler: sampler name
+            - scheduler: scheduler name
+            - width: image width
+            - height: image height
+        """
+        settings = {}
+        
+        # Extract from KSampler nodes (steps, cfg, sampler, scheduler, seed)
+        sampler_node_types = {
+            'KSampler': {'steps': 'steps', 'cfg': 'cfg', 'sampler': 'sampler_name', 'scheduler': 'scheduler', 'seed': 'seed'},
+            'KSamplerAdvanced': {'steps': 'steps', 'cfg': 'cfg', 'sampler': 'sampler_name', 'scheduler': 'scheduler', 'seed': 'noise_seed'},
+            'SamplerCustom': {'steps': 'steps', 'cfg': 'cfg', 'seed': 'noise_seed'},
+            'SamplerCustomAdvanced': {'seed': 'noise_seed'},
+        }
+        
+        # Extract from CLIPTextEncode nodes (prompts)
+        prompts_found = []
+        negative_prompts_found = []
+        
+        # Extract model and LoRA names
+        models_found = []
+        loras_found = []
+        
+        # Extract image dimensions from EmptyLatentImage or similar
+        width = None
+        height = None
+        
+        for node_id, node_info in self.nodes.items():
+            node_type = node_info.get('type', '')
+            inputs = node_info.get('inputs', {})
+            widgets = node_info.get('widgets_values', [])
+            
+            # Extract sampler settings
+            if node_type in sampler_node_types:
+                param_map = sampler_node_types[node_type]
+                for setting_key, input_key in param_map.items():
+                    if isinstance(inputs, dict) and input_key in inputs:
+                        val = inputs[input_key]
+                        if val is not None and not isinstance(val, list):  # Not a connection
+                            if setting_key not in settings:  # Keep first found
+                                settings[setting_key] = val
+            
+            # Extract prompts from CLIPTextEncode
+            if node_type == 'CLIPTextEncode':
+                text = None
+                if isinstance(inputs, dict) and 'text' in inputs:
+                    text = inputs.get('text')
+                elif widgets:
+                    text = widgets[0] if widgets else None
+                
+                if text and isinstance(text, str):
+                    # Try to determine if positive or negative based on common patterns
+                    text_lower = text.lower()
+                    is_negative = any(neg in text_lower for neg in [
+                        'ugly', 'bad', 'worst', 'blurry', 'nsfw', 'watermark',
+                        'deformed', 'disfigured', 'mutated', 'lowres', 'low quality'
+                    ])
+                    if is_negative:
+                        negative_prompts_found.append(text)
+                    else:
+                        prompts_found.append(text)
+            
+            # Extract model name from CheckpointLoaderSimple
+            if node_type in ['CheckpointLoaderSimple', 'CheckpointLoader', 'UNETLoader']:
+                ckpt_name = None
+                if isinstance(inputs, dict) and 'ckpt_name' in inputs:
+                    ckpt_name = inputs.get('ckpt_name')
+                elif isinstance(inputs, dict) and 'unet_name' in inputs:
+                    ckpt_name = inputs.get('unet_name')
+                elif widgets:
+                    ckpt_name = widgets[0] if widgets else None
+                
+                if ckpt_name and isinstance(ckpt_name, str):
+                    # Clean up the name (remove path, extension)
+                    model_name = Path(ckpt_name).stem
+                    models_found.append(model_name)
+            
+            # Extract LoRA names
+            if node_type in ['LoraLoader', 'LoraLoaderModelOnly']:
+                lora_name = None
+                if isinstance(inputs, dict) and 'lora_name' in inputs:
+                    lora_name = inputs.get('lora_name')
+                elif widgets:
+                    lora_name = widgets[0] if widgets else None
+                
+                if lora_name and isinstance(lora_name, str):
+                    lora_clean = Path(lora_name).stem
+                    # Also extract strength if available
+                    strength = None
+                    if isinstance(inputs, dict):
+                        strength = inputs.get('strength_model') or inputs.get('strength')
+                    elif len(widgets) > 1:
+                        strength = widgets[1] if isinstance(widgets[1], (int, float)) else None
+                    
+                    if strength is not None:
+                        loras_found.append(f"{lora_clean}:{strength}")
+                    else:
+                        loras_found.append(lora_clean)
+            
+            # Extract dimensions from EmptyLatentImage
+            if node_type in ['EmptyLatentImage', 'EmptySD3LatentImage']:
+                if isinstance(inputs, dict):
+                    if 'width' in inputs and not isinstance(inputs['width'], list):
+                        width = inputs['width']
+                    if 'height' in inputs and not isinstance(inputs['height'], list):
+                        height = inputs['height']
+                elif widgets and len(widgets) >= 2:
+                    width = widgets[0] if isinstance(widgets[0], int) else None
+                    height = widgets[1] if isinstance(widgets[1], int) else None
+        
+        # Compile results
+        if prompts_found:
+            settings['prompt'] = prompts_found[0]  # Use first positive prompt
+        if negative_prompts_found:
+            settings['negative_prompt'] = negative_prompts_found[0]
+        if models_found:
+            settings['model'] = models_found[0]  # Use first model
+        if loras_found:
+            settings['loras'] = ','.join(loras_found)
+        if width and height:
+            settings['width'] = str(width)
+            settings['height'] = str(height)
+        
+        # Convert numeric values to strings for metadata storage
+        for key in ['seed', 'steps', 'cfg']:
+            if key in settings:
+                settings[key] = str(settings[key])
+        
+        return settings
+    
     def _parse_nodes(self):
         """Parse all nodes in the workflow."""
         # Handle both prompt format and workflow format
@@ -861,10 +1006,11 @@ class _KumihoSaveBase:
     OUTPUT_NODE = True
     
     def _parse_workflow(self, prompt, extra_pnginfo):
-        """Parse workflow to extract dependencies and seeds."""
+        """Parse workflow to extract dependencies, seeds, and generation settings."""
         workflow_data = {}
         dependencies = []
         seeds = {}
+        generation_settings = {}
         
         if prompt:
             parser = WorkflowParser(prompt)
@@ -872,11 +1018,13 @@ class _KumihoSaveBase:
             workflow_data = parsed
             dependencies = parsed.get('dependencies', [])
             seeds = parser.extract_seeds()
+            generation_settings = parser.extract_generation_settings()
         
-        return workflow_data, dependencies, seeds
+        return workflow_data, dependencies, seeds, generation_settings
     
     def _build_lineage(self, project, category, artifact_name, kind, 
-                       media_info, dependencies, seeds, auto_register_deps, create_lineage,
+                       media_info, dependencies, seeds, generation_settings,
+                       auto_register_deps, create_lineage,
                        prompt, extra_pnginfo):
         """Build lineage data structure."""
         lineage = {
@@ -890,6 +1038,7 @@ class _KumihoSaveBase:
             'dependencies': [],
             'edges': [],
             'seeds': seeds,  # Store extracted seed values
+            'generation_settings': generation_settings,  # Store generation settings for asset browser
             'timestamp': datetime.now().isoformat(),
         }
         
@@ -1061,13 +1210,23 @@ class _KumihoSaveBase:
                     except Exception:
                         pass
                 
-                revision = item.create_revision(metadata={
+                # Get generation settings for asset browser display
+                gen_settings = lineage.get('generation_settings', {})
+                
+                # Build revision metadata - include generation settings as top-level keys
+                # so asset browser can easily read prompt, model, steps, cfg, etc.
+                revision_metadata = {
                     "timestamp": lineage['timestamp'],
                     "description": description,
                     "tags": tags,
                     "workflow": workflow_json,  # Full workflow for reproducibility
                     "seeds": seeds_json,  # Seeds for quick reference
-                })
+                    # Generation settings for asset browser (top-level for easy access)
+                    **gen_settings,
+                }
+                
+                revision = item.create_revision(metadata=revision_metadata)
+                print(f"[Kumiho] Revision created with generation settings: {list(gen_settings.keys())}")
                 
                 # Create artifacts for each saved file
                 for idx, path in enumerate(saved_paths):
@@ -1493,8 +1652,8 @@ class KumihoSaveImage(_KumihoSaveBase):
         """Register images to Kumiho Cloud with lineage."""
         project = get_default_project()
         
-        # Parse workflow (extracts dependencies and seed values)
-        workflow_data, dependencies, seeds = self._parse_workflow(prompt, extra_pnginfo)
+        # Parse workflow (extracts dependencies, seed values, and generation settings)
+        workflow_data, dependencies, seeds, generation_settings = self._parse_workflow(prompt, extra_pnginfo)
         
         # Build media info
         media_info = {
@@ -1506,7 +1665,8 @@ class KumihoSaveImage(_KumihoSaveBase):
         # Build lineage
         lineage = self._build_lineage(
             project, category, item_name, 'image',
-            media_info, dependencies, seeds, auto_register_deps, create_lineage,
+            media_info, dependencies, seeds, generation_settings,
+            auto_register_deps, create_lineage,
             prompt, extra_pnginfo
         )
         
@@ -1731,8 +1891,8 @@ class KumihoSaveVideo(_KumihoSaveBase):
         """Register video to Kumiho Cloud with lineage."""
         project = get_default_project()
         
-        # Parse workflow (extracts dependencies and seed values)
-        workflow_data, dependencies, seeds = self._parse_workflow(prompt, extra_pnginfo)
+        # Parse workflow (extracts dependencies, seed values, and generation settings)
+        workflow_data, dependencies, seeds, generation_settings = self._parse_workflow(prompt, extra_pnginfo)
         
         # Build media info
         frame_count = images.shape[0]
@@ -1748,7 +1908,8 @@ class KumihoSaveVideo(_KumihoSaveBase):
         # Build lineage
         lineage = self._build_lineage(
             project, category, item_name, 'video',
-            media_info, dependencies, seeds, auto_register_deps, create_lineage,
+            media_info, dependencies, seeds, generation_settings,
+            auto_register_deps, create_lineage,
             prompt, extra_pnginfo
         )
         
