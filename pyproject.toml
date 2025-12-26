@@ -20,8 +20,8 @@ Repository = "https://github.com/kumihoclouds/kumiho-comfyui"
 Documentation = "https://docs.kumiho.io"
 
 [tool.comfy]
-PublisherId = "kumihoclouds"
-DisplayName = "Kumiho ComfyUI Nodes"
+PublisherId = "kumiho"
+DisplayName = "Kumiho"
 Icon = "https://kumiho.io/images/kumiho_icon.png"
 
 [build-system]
