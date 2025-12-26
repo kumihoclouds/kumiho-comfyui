@@ -133,7 +133,7 @@ When reporting issues, please include:
 ## Questions?
 
 - Open a [GitHub Discussion](https://github.com/kumihoclouds/kumiho-comfyui/discussions)
-- Join our [Discord](https://discord.gg/kumiho)
+- Join our [Discord](https://discord.gg/Utp2P8G69P)
 - Email us at [dev@kumiho.io](mailto:dev@kumiho.io)
 
 ## License

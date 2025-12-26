@@ -62,7 +62,7 @@ except ImportError as e:
     kumiho = None
     DEPENDS_ON = DERIVED_FROM = REFERENCED = CONTAINS = CREATED_FROM = None
     print(f"[Kumiho] SDK not available: {e}")
-    print("[Kumiho] Install with: pip install kumiho && kumiho-auth login")
+    print("[Kumiho] Install with: pip install kumiho && kumiho-cli login")
 except Exception as e:
     HAS_KUMIHO_SDK = False
     kumiho = None
@@ -75,7 +75,7 @@ except Exception as e:
 # =============================================================================
 
 DEFAULT_PROJECT_TEMPLATE = "comfyui-{tenant}"
-DEFAULT_API_ENDPOINT = "https://api.kumiho.io"
+DEFAULT_API_ENDPOINT = "https://api.kumiho.cloud"
 CACHE_TTL_SECONDS = 300  # 5 minute cache for asset lists
 
 # =============================================================================
@@ -537,7 +537,6 @@ if HAS_PROMPT_SERVER:
             "message": "Catalog refresh triggered"
         })
 
-
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -585,6 +584,26 @@ def get_default_project() -> str:
     """Get the default ComfyUI project name using tenant slug."""
     tenant = get_tenant_name()
     return DEFAULT_PROJECT_TEMPLATE.format(tenant=tenant)
+
+
+def get_configured_project() -> str:
+    """Return the project to use, relying on SDK/tenant info (no disk persistence)."""
+    # Highest priority: explicit env override
+    env_project = os.environ.get("KUMIHO_PROJECT")
+    if env_project and env_project.strip():
+        return env_project.strip()
+
+    # Prefer SDK-provided tenant slug if available
+    if HAS_KUMIHO_SDK:
+        try:
+            slug = kumiho.get_tenant_slug()
+            if slug:
+                return DEFAULT_PROJECT_TEMPLATE.format(tenant=slug)
+        except Exception:
+            pass
+
+    # Fallback to derived default
+    return get_default_project()
 
 
 def parse_kref(kref: str) -> Dict[str, Any]:
@@ -1005,6 +1024,11 @@ class _KumihoSaveBase:
     
     OUTPUT_NODE = True
     
+    def _is_revision_invalid_error(self, error: Exception) -> bool:
+        """Return True when the SDK reports a missing or published revision."""
+        message = str(error)
+        return "Revision not found or is published" in message or "PERMISSION_DENIED" in message
+    
     def _parse_workflow(self, prompt, extra_pnginfo):
         """Parse workflow to extract dependencies, seeds, and generation settings."""
         workflow_data = {}
@@ -1121,7 +1145,7 @@ class _KumihoSaveBase:
         
         if not HAS_KUMIHO_SDK:
             print("[Kumiho] SDK not available - skipping cloud registration")
-            print("[Kumiho] Install with: pip install kumiho && kumiho-auth login")
+            print("[Kumiho] Install with: pip install kumiho && kumiho-cli login")
             return output_kref
         
         print(f"[Kumiho] Starting registration for {artifact_name} in {project}/{category}")
@@ -1229,11 +1253,31 @@ class _KumihoSaveBase:
                 print(f"[Kumiho] Revision created with generation settings: {list(gen_settings.keys())}")
                 
                 # Create artifacts for each saved file
+                artifact_entries = []
                 for idx, path in enumerate(saved_paths):
                     artifact_suffix = f"_{idx}" if len(saved_paths) > 1 else ""
                     artifact_name_full = f"{kind}{artifact_suffix}"
+                    artifact_entries.append((artifact_name_full, path))
+                
+                created_artifacts = []
+                retried_revision = False
+                for artifact_name_full, path in artifact_entries:
                     print(f"[Kumiho] Creating artifact: {artifact_name_full} -> {path}")
-                    revision.create_artifact(artifact_name_full, path)
+                    try:
+                        revision.create_artifact(artifact_name_full, path)
+                        created_artifacts.append((artifact_name_full, path))
+                    except Exception as create_err:
+                        if (not retried_revision) and self._is_revision_invalid_error(create_err):
+                            print("[Kumiho] Revision invalid, recreating revision and retrying artifacts")
+                            revision = item.create_revision(metadata=revision_metadata)
+                            retried_revision = True
+                            retry_entries = created_artifacts + [(artifact_name_full, path)]
+                            created_artifacts = []
+                            for retry_name, retry_path in retry_entries:
+                                revision.create_artifact(retry_name, retry_path)
+                                created_artifacts.append((retry_name, retry_path))
+                        else:
+                            raise
                 
                 # Tag if requested
                 if tags:
@@ -1280,10 +1324,20 @@ class _KumihoSaveBase:
                                 # File is already registered, use its revision
                                 artifact = existing_artifacts[0]  # Use first match
                                 dep_revision = artifact.get_revision()
-                                print(f"[Kumiho] Found existing artifact: {artifact.kref} -> revision {dep_revision.number if dep_revision else 'unknown'}")
-                            else:
-                                # File not registered, register it now
-                                print(f"[Kumiho] File not registered, registering: {file_path}")
+                                dep_kref = ""
+                                if dep_revision and hasattr(dep_revision, "kref"):
+                                    dep_kref = dep_revision.kref
+                                elif hasattr(artifact, "kref"):
+                                    dep_kref = artifact.kref
+                                if dep_kref and not dep_kref.startswith(f"kref://{project_name}/"):
+                                    print(f"[Kumiho] Found artifact in different project, re-registering in current project: {dep_kref}")
+                                    dep_revision = None
+                                else:
+                                    print(f"[Kumiho] Found existing artifact: {artifact.kref} -> revision {dep_revision.number if dep_revision else 'unknown'}")
+                            
+                            if not dep_revision:
+                                # File not registered in this project, register it now
+                                print(f"[Kumiho] File not registered in current project, registering: {file_path}")
                                 
                                 # Get asset info from mapping
                                 asset_info = ASSET_TYPE_MAP.get(asset_type, {})
@@ -1402,7 +1456,7 @@ class _KumihoSaveBase:
         
         if not HAS_KUMIHO_SDK:
             print("[Kumiho] SDK not available - skipping cloud registration")
-            print("[Kumiho] Install with: pip install kumiho && kumiho-auth login")
+            print("[Kumiho] Install with: pip install kumiho && kumiho-cli login")
             return output_kref
         
         print(f"[Kumiho] Starting video registration for {artifact_name} in {project}/{category}")
@@ -1465,25 +1519,44 @@ class _KumihoSaveBase:
                     except Exception:
                         pass
                 
-                revision = item.create_revision(metadata={
+                revision_metadata = {
                     "timestamp": lineage['timestamp'],
                     "description": description,
                     "tags": tags,
                     "workflow": workflow_json,
                     "seeds": seeds_json,
-                })
+                }
+                revision = item.create_revision(metadata=revision_metadata)
                 
-                # Create artifacts for video files
+                # Create artifacts for video files and preview
+                artifact_entries = []
                 for idx, path in enumerate(saved_paths):
                     artifact_suffix = f"_{idx}" if len(saved_paths) > 1 else ""
                     artifact_name_full = f"{kind}{artifact_suffix}"
-                    print(f"[Kumiho] Creating artifact: {artifact_name_full} -> {path}")
-                    revision.create_artifact(artifact_name_full, path)
+                    artifact_entries.append((artifact_name_full, path))
                 
-                # Create preview artifact if we have a preview GIF
                 if preview_gif_path and os.path.exists(preview_gif_path):
-                    print(f"[Kumiho] Creating preview artifact: preview -> {preview_gif_path}")
-                    revision.create_artifact("preview", preview_gif_path)
+                    artifact_entries.append(("preview", preview_gif_path))
+                
+                created_artifacts = []
+                retried_revision = False
+                for artifact_name_full, path in artifact_entries:
+                    print(f"[Kumiho] Creating artifact: {artifact_name_full} -> {path}")
+                    try:
+                        revision.create_artifact(artifact_name_full, path)
+                        created_artifacts.append((artifact_name_full, path))
+                    except Exception as create_err:
+                        if (not retried_revision) and self._is_revision_invalid_error(create_err):
+                            print("[Kumiho] Revision invalid, recreating revision and retrying artifacts")
+                            revision = item.create_revision(metadata=revision_metadata)
+                            retried_revision = True
+                            retry_entries = created_artifacts + [(artifact_name_full, path)]
+                            created_artifacts = []
+                            for retry_name, retry_path in retry_entries:
+                                revision.create_artifact(retry_name, retry_path)
+                                created_artifacts.append((retry_name, retry_path))
+                        else:
+                            raise
                 
                 # Tag if requested
                 if tags:
@@ -1521,6 +1594,71 @@ class _KumihoSaveBase:
                             if existing_artifacts:
                                 artifact = existing_artifacts[0]
                                 dep_revision = artifact.get_revision()
+                                dep_kref = ""
+                                if dep_revision and hasattr(dep_revision, "kref"):
+                                    dep_kref = dep_revision.kref
+                                elif hasattr(artifact, "kref"):
+                                    dep_kref = artifact.kref
+                                if dep_kref and not dep_kref.startswith(f"kref://{project_name}/"):
+                                    dep_revision = None
+                            
+                            if not dep_revision:
+                                # File not registered in this project, register it now
+                                asset_info = ASSET_TYPE_MAP.get(asset_type, {})
+                                dep_space = asset_info.get('space', asset_type)
+                                
+                                # For input assets, determine kind dynamically based on file extension
+                                if asset_type == 'input':
+                                    dep_kind = get_input_kind(file_path)
+                                else:
+                                    dep_kind = asset_info.get('kind', asset_type)
+                                
+                                # Detect base model for subfoldering
+                                base_model = detect_base_model(file_path)
+                                if base_model != 'unknown' and asset_type in ['checkpoints', 'loras', 'controlnet']:
+                                    dep_space = f"{dep_space}/{base_model}"
+                                
+                                # Generate item name from file path
+                                file_name = Path(file_path).stem
+                                
+                                # Create space hierarchy for dependency
+                                dep_space_parts = dep_space.split('/')
+                                dep_current_space = None
+                                
+                                for i, part in enumerate(dep_space_parts):
+                                    dep_space_path = '/'.join(dep_space_parts[:i+1])
+                                    try:
+                                        dep_current_space = project_obj.get_space(dep_space_path)
+                                    except Exception:
+                                        dep_current_space = None
+                                    
+                                    if not dep_current_space:
+                                        if i > 0:
+                                            parent_path = f"/{project_name}/{'/'.join(dep_space_parts[:i])}"
+                                        else:
+                                            parent_path = None
+                                        dep_current_space = project_obj.create_space(part, parent_path=parent_path)
+                                
+                                if dep_current_space:
+                                    # Get or create the dependency item
+                                    try:
+                                        dep_item = dep_current_space.get_item(file_name, dep_kind)
+                                    except Exception:
+                                        dep_item = dep_current_space.create_item(file_name, dep_kind)
+                                        dep_item.set_metadata(metadata={
+                                            "source": "comfyui-auto",
+                                            "asset_type": asset_type,
+                                            "base_model": base_model,
+                                        })
+                                    
+                                    # Create revision for the dependency
+                                    dep_revision = dep_item.create_revision(metadata={
+                                        "registered_from": "comfyui-lineage",
+                                        "original_path": file_path,
+                                    })
+                                    
+                                    # Create artifact pointing to the file
+                                    dep_revision.create_artifact(dep_kind, file_path)
                             
                             if dep_revision:
                                 edge_type_str = 'USED_INPUT'
@@ -1583,16 +1721,26 @@ class KumihoSaveImage(_KumihoSaveBase):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "project": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "Project name (blank = auto)"
+                }),
                 "images": ("IMAGE",),
+                "category": ("STRING", {
+                    "default": "outputs/images",
+                    "multiline": False,
+                    "placeholder": "Space path (e.g., outputs/portraits)"
+                }),
                 "item_name": ("STRING", {
                     "default": "output",
                     "multiline": False,
                     "placeholder": "Name for the item (revisions will be auto-versioned)"
                 }),
-                "category": ("STRING", {
-                    "default": "outputs/images",
+                "item_kind": ("STRING", {
+                    "default": "image",
                     "multiline": False,
-                    "placeholder": "Space path (e.g., outputs/portraits)"
+                    "placeholder": "Item kind (e.g., image, checkpoint)"
                 }),
             },
             "optional": {
@@ -1602,9 +1750,14 @@ class KumihoSaveImage(_KumihoSaveBase):
                     "placeholder": "Description of this output"
                 }),
                 "tags": ("STRING", {
-                    "default": "",
+                    "default": None,
                     "multiline": False,
                     "placeholder": "Comma-separated tags"
+                }),
+                "file_path": ("STRING", {
+                    "default": None,
+                    "multiline": False,
+                    "placeholder": "Optional: Custom file path to save (overrides auto-generated path)"
                 }),
                 "auto_register_deps": ("BOOLEAN", {
                     "default": True,
@@ -1625,11 +1778,6 @@ class KumihoSaveImage(_KumihoSaveBase):
                     "max": 100,
                     "step": 1,
                 }),
-                "file_path": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "Optional: Custom file path to save (overrides auto-generated path)"
-                }),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -1643,14 +1791,15 @@ class KumihoSaveImage(_KumihoSaveBase):
     OUTPUT_NODE = True
     FUNCTION = "register"
     
-    def register(self, images: torch.Tensor, item_name: str, category: str,
-                 description: str = "", tags: str = "",
+    def register(self, images: torch.Tensor, item_name: str, item_kind: str, category: str,
+                 project: str = "", description: str = "", tags: Optional[str] = None,
                  auto_register_deps: bool = True, create_lineage: bool = True,
                  image_format: str = "png", quality: int = 95,
-                 file_path: str = "",
-                 prompt: Dict = None, extra_pnginfo: Dict = None, unique_id: str = None):
+                 file_path: Optional[str] = None,
+                 prompt: Optional[Dict] = None, extra_pnginfo: Optional[Dict] = None, unique_id: Optional[str] = None):
         """Register images to Kumiho Cloud with lineage."""
-        project = get_default_project()
+        project = project.strip() or get_configured_project()
+        effective_kind = item_kind.strip() if item_kind and item_kind.strip() else "image"
         
         # Parse workflow (extracts dependencies, seed values, and generation settings)
         workflow_data, dependencies, seeds, generation_settings = self._parse_workflow(prompt, extra_pnginfo)
@@ -1664,7 +1813,7 @@ class KumihoSaveImage(_KumihoSaveBase):
         
         # Build lineage
         lineage = self._build_lineage(
-            project, category, item_name, 'image',
+            project, category, item_name, effective_kind,
             media_info, dependencies, seeds, generation_settings,
             auto_register_deps, create_lineage,
             prompt, extra_pnginfo
@@ -1750,7 +1899,7 @@ class KumihoSaveImage(_KumihoSaveBase):
         
         # Register with Kumiho
         output_kref = self._register_with_kumiho(
-            project, category, item_name, 'image',
+            project, category, item_name, effective_kind,
             saved_paths, lineage, description, tags, create_lineage, timestamp
         )
         lineage['output']['kref'] = output_kref
@@ -1815,16 +1964,26 @@ class KumihoSaveVideo(_KumihoSaveBase):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "project": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "Project name (blank = auto)"
+                }),
                 "images": ("IMAGE",),  # Batch of frames [B,H,W,C]
+                "category": ("STRING", {
+                    "default": "outputs/videos",
+                    "multiline": False,
+                    "placeholder": "Space path (e.g., outputs/animations)"
+                }),
                 "item_name": ("STRING", {
                     "default": "video_output",
                     "multiline": False,
                     "placeholder": "Name for the item (revisions will be auto-versioned)"
                 }),
-                "category": ("STRING", {
-                    "default": "outputs/videos",
+                "item_kind": ("STRING", {
+                    "default": "video",
                     "multiline": False,
-                    "placeholder": "Space path (e.g., outputs/animations)"
+                    "placeholder": "Item kind (e.g., video, animation)"
                 }),
                 "fps": ("FLOAT", {
                     "default": 24.0,
@@ -1840,9 +1999,14 @@ class KumihoSaveVideo(_KumihoSaveBase):
                     "placeholder": "Description of this output"
                 }),
                 "tags": ("STRING", {
-                    "default": "",
+                    "default": None,
                     "multiline": False,
                     "placeholder": "Comma-separated tags"
+                }),
+                "file_path": ("STRING", {
+                    "default": None,
+                    "multiline": False,
+                    "placeholder": "Optional: Custom file path to save (overrides auto-generated path)"
                 }),
                 "auto_register_deps": ("BOOLEAN", {
                     "default": True,
@@ -1858,16 +2022,11 @@ class KumihoSaveVideo(_KumihoSaveBase):
                     "default": "mp4"
                 }),
                 "quality": ("INT", {
-                    "default": 85,
+                    "default": 95,
                     "min": 1,
                     "max": 100,
                     "step": 1,
                     "tooltip": "Video quality (CRF for mp4/webm, affects GIF palette)"
-                }),
-                "file_path": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "Optional: Custom file path to save (overrides auto-generated path)"
                 }),
             },
             "hidden": {
@@ -1882,14 +2041,15 @@ class KumihoSaveVideo(_KumihoSaveBase):
     OUTPUT_NODE = True
     FUNCTION = "register"
     
-    def register(self, images: torch.Tensor, item_name: str, category: str,
-                 fps: float = 24.0, description: str = "", tags: str = "",
+    def register(self, images: torch.Tensor, item_name: str, item_kind: str, category: str,
+                 fps: float = 24.0, project: str = "", description: str = "", tags: Optional[str] = None,
                  auto_register_deps: bool = True, create_lineage: bool = True,
-                 video_format: str = "mp4", quality: int = 85,
-                 file_path: str = "",
-                 prompt: Dict = None, extra_pnginfo: Dict = None, unique_id: str = None):
+                 video_format: str = "mp4", quality: int = 95,
+                 file_path: Optional[str] = None,
+                 prompt: Optional[Dict] = None, extra_pnginfo: Optional[Dict] = None, unique_id: Optional[str] = None):
         """Register video to Kumiho Cloud with lineage."""
-        project = get_default_project()
+        project = project.strip() or get_configured_project()
+        effective_kind = item_kind.strip() if item_kind and item_kind.strip() else "video"
         
         # Parse workflow (extracts dependencies, seed values, and generation settings)
         workflow_data, dependencies, seeds, generation_settings = self._parse_workflow(prompt, extra_pnginfo)
@@ -1907,7 +2067,7 @@ class KumihoSaveVideo(_KumihoSaveBase):
         
         # Build lineage
         lineage = self._build_lineage(
-            project, category, item_name, 'video',
+            project, category, item_name, effective_kind,
             media_info, dependencies, seeds, generation_settings,
             auto_register_deps, create_lineage,
             prompt, extra_pnginfo
@@ -2071,7 +2231,7 @@ class KumihoSaveVideo(_KumihoSaveBase):
         
         # Register with Kumiho (pass preview_gif_path for additional artifact)
         output_kref = self._register_video_with_kumiho(
-            project, category, item_name, 'video',
+            project, category, item_name, effective_kind,
             saved_paths, preview_gif_path, lineage, description, tags, create_lineage, timestamp
         )
         lineage['output']['kref'] = output_kref
@@ -2104,7 +2264,7 @@ class KumihoLoadAsset:
     
     Supports two modes:
     1. Direct kref input: Enter a kref URI directly
-    2. Dropdown selection: Browse spaces (categories) and select items
+    2. Component entry: Provide project/space/item fields
     
     kref format: kref://project/space/item.kind?r=revision&a=artifact_type
     
@@ -2117,33 +2277,15 @@ class KumihoLoadAsset:
     
     @classmethod
     def INPUT_TYPES(cls):
-        # Build space options - common spaces for ComfyUI assets
-        space_options = [
-            "[Select Space]",
-            "outputs/images",
-            "outputs/videos",
-            "checkpoint",
-            "checkpoint/flux",
-            "checkpoint/sdxl", 
-            "checkpoint/sd15",
-            "lora",
-            "lora/flux",
-            "lora/sdxl",
-            "lora/sd15",
-            "vae",
-            "controlnet",
-            "embedding",
-            "diffusion",
-            "clip",
-            "input",
-        ]
+        catalog = get_asset_catalog()
+        project_options = ["[Auto]"] + catalog.get_projects()
         
         return {
             "required": {
                 "item_name": ("STRING", {
-                    "default": "",
+                    "default": "image",
                     "multiline": False,
-                    "placeholder": "Item name to load"
+                    "placeholder": "Item name (e.g., my_asset)"
                 }),
                 "item_kind": ("STRING", {
                     "default": "image",
@@ -2152,9 +2294,13 @@ class KumihoLoadAsset:
                 }),
             },
             "optional": {
-                # Space dropdown for browsing
-                "space": (space_options, {
-                    "default": "[Select Space]"
+                "project": (project_options, {
+                    "default": "[Auto]"
+                }),
+                "space": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "Space path (e.g., checkpoint/flux)"
                 }),
                 # Direct kref mode input (overrides all above if provided)
                 "kref_uri": ("STRING", {
@@ -2163,20 +2309,20 @@ class KumihoLoadAsset:
                     "placeholder": "kref://project/space/item.kind?r=revision"
                 }),
                 # Common options
-                "revision": ("STRING", {
-                    "default": "latest",
+                "tag / revision": ("STRING", {
+                    "default": "",
                     "multiline": False,
-                    "placeholder": "Revision number or 'latest'"
+                    "placeholder": "Revision tag or number (blank = latest)"
                 }),
                 "artifact_name": ("STRING", {
                     "default": "",
                     "multiline": False,
                     "placeholder": "Artifact name (e.g., video, preview)"
                 }),
-                "fallback_path": ("STRING", {
+                "fallback_file_path": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "Local fallback path if kref fails"
+                    "placeholder": "Local fallback file path if kref fails"
                 }),
             }
         }
@@ -2191,32 +2337,44 @@ class KumihoLoadAsset:
         return float("nan")
     
     def load_asset(self, item_name: str, item_kind: str,
-                   space: str = "", kref_uri: str = "", 
-                   revision: str = "latest", artifact_name: str = "",
-                   fallback_path: str = ""):
+                   project: str = "", space: str = "", kref_uri: str = "", 
+                   artifact_name: str = "", fallback_file_path: str = "",
+                   tag_revision: str = "", **kwargs):
         """
         Load an asset from Kumiho Cloud and return its local file path.
         
         Args:
             item_name: Item name to load
             item_kind: Item kind (image, video, checkpoint, etc.)
-            space: Space path from dropdown (e.g., "input", "outputs")
+            space: Space path (e.g., "input", "outputs")
             kref_uri: Direct kref URI (overrides component inputs if provided)
-            revision: Revision to load (default: latest)
+            tag_revision: Revision tag or number to load (default: latest)
             artifact_name: Specific artifact name to retrieve
-            fallback_path: Local path to use if kref resolution fails
+            fallback_file_path: Local file path to use if kref resolution fails
         
         Returns:
             (file_path, kref, metadata): Tuple of resolved file path, kref URI, and metadata JSON
         """
-        # Get default project internally - no project input needed
-        default_project = get_default_project()
+        # Allow per-node project override, otherwise use configured default
+        selected_project = project.strip()
+        if selected_project == "[Auto]":
+            selected_project = ""
+        default_project = selected_project or get_configured_project()
+        
+        raw_tag_value = kwargs.get("tag / revision", tag_revision)
+        if raw_tag_value is None:
+            tag_value = ""
+        elif isinstance(raw_tag_value, str):
+            tag_value = raw_tag_value.strip()
+        else:
+            tag_value = str(raw_tag_value).strip()
+        tag_for_resolution = tag_value or "latest"
         
         metadata = {
             'item_name': item_name,
             'item_kind': item_kind,
             'project': default_project,
-            'revision': revision,
+            'tag': tag_value,
             'artifact_name': artifact_name,
             'status': 'pending'
         }
@@ -2230,10 +2388,10 @@ class KumihoLoadAsset:
         else:
             # Priority 2: Build kref from components
             if not item_name:
-                if fallback_path:
+                if fallback_file_path:
                     metadata['status'] = 'fallback'
                     metadata['message'] = 'No item name provided'
-                    return (fallback_path, "", json.dumps(metadata))
+                    return (fallback_file_path, "", json.dumps(metadata))
                 else:
                     metadata['status'] = 'error'
                     metadata['error'] = 'Item name is required'
@@ -2241,8 +2399,7 @@ class KumihoLoadAsset:
             
             # Determine effective space from dropdown or item_kind
             effective_space = ""
-            if space and space != "[Select Space]":
-                # Space dropdown value
+            if space:
                 effective_space = space.strip()
             elif item_kind:
                 # Use item_kind to determine default space
@@ -2265,51 +2422,59 @@ class KumihoLoadAsset:
         metadata['effective_kref'] = effective_kref
         
         if not effective_kref:
-            if fallback_path:
+            if fallback_file_path:
                 metadata['status'] = 'fallback'
-                return (fallback_path, "", json.dumps(metadata))
+                return (fallback_file_path, "", json.dumps(metadata))
             else:
                 metadata['status'] = 'error'
                 metadata['error'] = 'Could not build kref URI'
                 return ("", "", json.dumps(metadata))
         
+        parsed = None
         try:
             # Parse the kref URI
             parsed = parse_kref(effective_kref)
             
             # Override revision if provided
-            if revision and revision != 'latest':
-                parsed['revision'] = revision
+            if tag_value:
+                parsed['revision'] = tag_value
+            elif '?r=' in effective_kref or '&r=' in effective_kref:
+                tag_for_resolution = parsed.get('revision') or tag_for_resolution
             
             metadata['parsed_kref'] = parsed
             
             # Resolve kref to actual file path using artifact location
-            resolved_path = self._resolve_kref_to_path(effective_kref, parsed, artifact_name, revision)
+            resolved_path = self._resolve_kref_to_path(effective_kref, parsed, artifact_name, tag_for_resolution)
             
             if resolved_path:
                 metadata['status'] = 'resolved'
                 metadata['resolved_path'] = resolved_path
-                return (resolved_path, effective_kref, json.dumps(metadata, indent=2))
+                return_kref = self._build_output_kref(effective_kref, parsed, tag_value, artifact_name)
+                return (resolved_path, return_kref, json.dumps(metadata, indent=2))
             else:
                 # Resolution failed
-                if fallback_path:
+                if fallback_file_path:
                     metadata['status'] = 'fallback'
                     metadata['message'] = 'kref resolution failed, using fallback'
-                    return (fallback_path, effective_kref, json.dumps(metadata, indent=2))
+                    return_kref = self._build_output_kref(effective_kref, parsed, tag_value, artifact_name)
+                    return (fallback_file_path, return_kref, json.dumps(metadata, indent=2))
                 else:
                     metadata['status'] = 'unresolved'
                     metadata['message'] = 'Could not resolve kref to file path'
-                    return ("", effective_kref, json.dumps(metadata, indent=2))
+                    return_kref = self._build_output_kref(effective_kref, parsed, tag_value, artifact_name)
+                    return ("", return_kref, json.dumps(metadata, indent=2))
             
         except Exception as e:
             metadata['status'] = 'error'
             metadata['error'] = str(e)
             
-            if fallback_path:
+            if fallback_file_path:
                 metadata['status'] = 'fallback'
-                return (fallback_path, effective_kref, json.dumps(metadata))
+                return_kref = self._build_output_kref(effective_kref, parsed, tag_value, artifact_name)
+                return (fallback_file_path, return_kref, json.dumps(metadata))
             
-            return ("", effective_kref, json.dumps(metadata))
+            return_kref = self._build_output_kref(effective_kref, parsed, tag_value, artifact_name)
+            return ("", return_kref, json.dumps(metadata))
     
     def _resolve_kref_to_path(self, kref: str, parsed: Dict, artifact_name: str = "", revision_str: str = "latest") -> Optional[str]:
         """
@@ -2409,6 +2574,15 @@ class KumihoLoadAsset:
             import traceback
             traceback.print_exc()
             return None
+
+    def _build_output_kref(self, effective_kref: str, parsed: Optional[Dict], tag_value: str, artifact_name: str) -> str:
+        if not parsed:
+            return effective_kref
+        kref_has_revision = '?r=' in effective_kref or '&r=' in effective_kref
+        revision = tag_value if tag_value else (parsed.get('revision') if kref_has_revision else None)
+        artifact = artifact_name.strip() if artifact_name.strip() else parsed.get('artifact_type')
+        return build_kref(parsed['project'], parsed['space'], parsed['item'], parsed['kind'],
+                          revision=revision, artifact_type=artifact)
 
 
 # =============================================================================
@@ -2544,11 +2718,16 @@ class KumihoSearchItems:
             "asset",
             "mask",
         ]
+        catalog = get_asset_catalog()
+        project_options = ["[Auto]"] + catalog.get_projects()
         
         return {
             "required": {
             },
             "optional": {
+                "project": (project_options, {
+                    "default": "[Auto]"
+                }),
                 "name_filter": ("STRING", {
                     "default": "",
                     "multiline": False,
@@ -2560,7 +2739,7 @@ class KumihoSearchItems:
                 "context_filter": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "Space path filter (default: current project/*)"
+                    "placeholder": "Project/space filter (default: selected project/*)"
                 }),
                 "limit": ("INT", {
                     "default": 50,
@@ -2581,7 +2760,7 @@ class KumihoSearchItems:
         """Force re-execution when inputs change."""
         return float("nan")
     
-    def search_items(self, name_filter: str = "", kind_filter: str = "", 
+    def search_items(self, project: str = "[Auto]", name_filter: str = "", kind_filter: str = "", 
                      context_filter: str = "", limit: int = 50):
         """
         Search for items in Kumiho Cloud using kumiho.item_search().
@@ -2590,6 +2769,7 @@ class KumihoSearchItems:
             name_filter: Name pattern to search for (supports wildcards like 'flux*')
             kind_filter: Filter by item kind (image, video, checkpoint, etc.)
             context_filter: Space path filter (defaults to current project/*)
+            project: Project to search within (default: auto)
             limit: Maximum number of results to return
             
         Returns:
@@ -2601,6 +2781,7 @@ class KumihoSearchItems:
             'items': [],
             'count': 0,
             'filters': {
+                'project': project,
                 'name_filter': name_filter,
                 'kind_filter': kind_filter,
                 'context_filter': context_filter,
@@ -2615,8 +2796,11 @@ class KumihoSearchItems:
             return (krefs, file_paths, json.dumps(results_data, indent=2), 0)
         
         try:
-            # Use default project as context if not specified
-            effective_context = context_filter.strip() if context_filter.strip() else f"{get_default_project()}"
+            selected_project = project.strip()
+            if selected_project == "[Auto]":
+                selected_project = ""
+            base_project = selected_project or get_configured_project()
+            effective_context = context_filter.strip() if context_filter.strip() else base_project
             results_data['filters']['effective_context'] = effective_context
             
             print(f"[Kumiho] Searching items: name_filter='{name_filter}', kind_filter='{kind_filter}', context_filter='{effective_context}'")

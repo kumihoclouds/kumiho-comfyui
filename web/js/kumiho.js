@@ -36,21 +36,27 @@ class KumihoSettings {
     }
     
     loadSettings() {
-        const stored = localStorage.getItem("kumiho_settings");
-        if (stored) {
-            try {
-                return JSON.parse(stored);
-            } catch (e) {
-                console.warn("Failed to parse Kumiho settings:", e);
-            }
-        }
-        return {
+        const defaults = {
             apiEndpoint: "https://api.kumiho.io",
-            project: "",
             autoRegister: true,
             createLineage: true,
             showNotifications: true,
         };
+
+        const stored = localStorage.getItem("kumiho_settings");
+        let parsed = {};
+
+        if (stored) {
+            try {
+                parsed = JSON.parse(stored) || {};
+            } catch (e) {
+                console.warn("Failed to parse Kumiho settings:", e);
+            }
+        }
+
+        const merged = { ...defaults, ...parsed };
+
+        return merged;
     }
     
     saveSettings() {
@@ -405,9 +411,19 @@ class KumihoSidebarPanel {
     createLoadAssetNode(kref) {
         // Parse kref to determine asset type
         let assetType = "checkpoint";
+        let itemName = "";
+        let tag = "";
         const kindMatch = kref.match(/\.(\w+)(\?|$)/);
         if (kindMatch) {
             assetType = kindMatch[1];
+        }
+        const itemMatch = kref.match(/\/([^\/]+)\.\w+(?:\?|$)/);
+        if (itemMatch) {
+            itemName = itemMatch[1];
+        }
+        const tagMatch = kref.match(/[?&]r=([^&]+)/);
+        if (tagMatch) {
+            tag = decodeURIComponent(tagMatch[1]);
         }
         
         // Create node via LiteGraph
@@ -415,9 +431,14 @@ class KumihoSidebarPanel {
             const node = app.graph.add(LiteGraph.createNode("KumihoLoadAsset"));
             if (node) {
                 // Set node properties
-                node.widgets?.find(w => w.name === "input_mode")?.value = "kref_uri";
                 node.widgets?.find(w => w.name === "kref_uri")?.value = kref;
-                node.widgets?.find(w => w.name === "asset_type")?.value = assetType;
+                node.widgets?.find(w => w.name === "item_kind")?.value = assetType;
+                if (itemName) {
+                    node.widgets?.find(w => w.name === "item_name")?.value = itemName;
+                }
+                if (tag) {
+                    node.widgets?.find(w => w.name === "tag / revision")?.value = tag;
+                }
                 
                 // Position near center of view
                 node.pos = [
@@ -456,13 +477,6 @@ class KumihoSidebarPanel {
                     <label for="kumiho-api-endpoint">API Endpoint</label>
                     <input type="text" id="kumiho-api-endpoint" 
                            value="${kumihoSettings.get('apiEndpoint')}">
-                </div>
-                
-                <div class="kumiho-setting">
-                    <label for="kumiho-project">Default Project</label>
-                    <input type="text" id="kumiho-project" 
-                           placeholder="ComfyUI@{tenant}"
-                           value="${kumihoSettings.get('project')}">
                 </div>
                 
                 <div class="kumiho-setting">
@@ -788,6 +802,45 @@ class KumihoSidebarPanel {
             .kumiho-setting input[type="checkbox"] {
                 margin-right: 8px;
             }
+
+            .kumiho-project-group {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+
+            .kumiho-radio-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                font-size: 13px;
+                color: #ccc;
+            }
+
+            .kumiho-project-existing {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+            }
+
+            .kumiho-project-existing select {
+                flex: 1;
+                padding: 8px 10px;
+                background: #1a1a2e;
+                border: 1px solid #333;
+                border-radius: 4px;
+                color: #fff;
+                font-size: 13px;
+            }
+
+            .kumiho-project-preview {
+                font-size: 12px;
+                color: #aaa;
+                background: #111827;
+                padding: 6px 8px;
+                border: 1px dashed #333;
+                border-radius: 4px;
+            }
             
             .kumiho-footer {
                 padding: 12px 16px;
@@ -915,19 +968,22 @@ class KumihoSidebarPanel {
         } else if (tabName === "lineage") {
             content.innerHTML = this.getLineageTabHTML();
         } else if (tabName === "settings") {
-            content.innerHTML = this.getSettingsTabHTML();
-            this.setupSettingsListeners();
+            this.initSettingsTab();
         }
+    }
+
+    async initSettingsTab() {
+        const content = document.getElementById("kumiho-tab-content");
+        content.innerHTML = this.getSettingsTabHTML();
+        this.setupSettingsListeners();
     }
     
     setupSettingsListeners() {
         document.getElementById("kumiho-save-settings")?.addEventListener("click", () => {
             kumihoSettings.set("apiEndpoint", document.getElementById("kumiho-api-endpoint").value);
-            kumihoSettings.set("project", document.getElementById("kumiho-project").value);
             kumihoSettings.set("autoRegister", document.getElementById("kumiho-auto-register").checked);
             kumihoSettings.set("createLineage", document.getElementById("kumiho-create-lineage").checked);
             kumihoSettings.set("showNotifications", document.getElementById("kumiho-show-notifications").checked);
-            
             this.showToast("Settings saved!", "success");
         });
     }

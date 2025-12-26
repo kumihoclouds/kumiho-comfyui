@@ -394,26 +394,17 @@ class TestKumihoAssetCatalog:
 class TestKumihoLoadAssetInputModes:
     """Tests for KumihoLoadAsset node with different input modes."""
     
-    def test_input_types_includes_modes(self):
-        """Test that INPUT_TYPES includes input_mode selection."""
-        from kumiho_nodes.nodes import KumihoLoadAsset
-        
-        input_types = KumihoLoadAsset.INPUT_TYPES()
-        
-        assert "input_mode" in input_types["required"]
-        modes = input_types["required"]["input_mode"][0]
-        assert "dropdown" in modes
-        assert "kref_uri" in modes
-    
     def test_input_types_has_project_space(self):
-        """Test that INPUT_TYPES includes project and space dropdowns."""
+        """Test that INPUT_TYPES includes project and space inputs."""
         from kumiho_nodes.nodes import KumihoLoadAsset
         
         input_types = KumihoLoadAsset.INPUT_TYPES()
         
         assert "project" in input_types["optional"]
         assert "space" in input_types["optional"]
-        assert "item_name" in input_types["optional"]
+        assert "item_name" in input_types["required"]
+        assert "tag / revision" in input_types["optional"]
+        assert "fallback_file_path" in input_types["optional"]
     
     def test_load_asset_kref_mode(self):
         """Test load_asset with kref_uri mode."""
@@ -421,8 +412,8 @@ class TestKumihoLoadAssetInputModes:
         
         node = KumihoLoadAsset()
         result, metadata_json = node.load_asset(
-            input_mode="kref_uri",
-            asset_type="checkpoint",
+            item_name="model",
+            item_kind="checkpoint",
             kref_uri="kref://Test/checkpoint/model.checkpoint"
         )
         
@@ -431,22 +422,21 @@ class TestKumihoLoadAssetInputModes:
         assert metadata['input_mode'] == 'kref_uri'
         assert metadata['effective_kref'] == "kref://Test/checkpoint/model.checkpoint"
     
-    def test_load_asset_dropdown_mode_builds_kref(self):
-        """Test load_asset with dropdown mode builds correct kref."""
+    def test_load_asset_component_mode_builds_kref(self):
+        """Test load_asset with component inputs builds correct kref."""
         from kumiho_nodes.nodes import KumihoLoadAsset
         
         node = KumihoLoadAsset()
         result, metadata_json = node.load_asset(
-            input_mode="dropdown",
-            asset_type="lora",
+            item_name="style-lora",
+            item_kind="lora",
             project="ComfyUI@Test",
-            space="ComfyUI@Test/lora/flux",
-            item_name="style-lora"
+            space="lora/flux"
         )
         
         import json
         metadata = json.loads(metadata_json)
-        assert metadata['input_mode'] == 'dropdown'
+        assert metadata['input_mode'] == 'components'
         assert 'lora/flux/style-lora.lora' in metadata['effective_kref']
     
     def test_load_asset_with_fallback(self):
@@ -455,10 +445,10 @@ class TestKumihoLoadAssetInputModes:
         
         node = KumihoLoadAsset()
         result, metadata_json = node.load_asset(
-            input_mode="kref_uri",
-            asset_type="checkpoint",
+            item_name="model",
+            item_kind="checkpoint",
             kref_uri="",  # Empty kref
-            fallback_path="/models/fallback.safetensors"
+            fallback_file_path="/models/fallback.safetensors"
         )
         
         import json

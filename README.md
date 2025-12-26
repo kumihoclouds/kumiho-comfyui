@@ -5,7 +5,7 @@
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom%20Nodes-blue)](https://github.com/comfyanonymous/ComfyUI)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Kumiho](https://img.shields.io/badge/Kumiho-Cloud-orange)](https://kumiho.io)
-[![Python SDK](https://img.shields.io/badge/SDK-v0.4.2-brightgreen)](https://pypi.org/project/kumiho/)
+[![Python SDK](https://img.shields.io/badge/SDK-v0.7.0%2B-brightgreen)](https://pypi.org/project/kumiho/)
 
 ## Overview
 
@@ -49,15 +49,15 @@ Before using Kumiho nodes, you must authenticate with Kumiho Cloud:
 pip install kumiho-cli
 
 # Login to Kumiho Cloud (opens browser for OAuth)
-kumiho-auth login
+kumiho-cli login
 
 # Verify authentication is working
-kumiho-auth status
+kumiho-cli whoami
 ```
 
-This creates an `authentication.json` file in your home directory (`~/.kumiho/`) that the SDK uses automatically.
+This creates a `kumiho_authentication.json` file in your home directory (`~/.kumiho/`) that the SDK uses automatically.
 
-> **Note**: You can also refresh your token anytime with `kumiho-auth refresh`
+> **Note**: You can also refresh your token anytime with `kumiho-cli refresh`
 
 ## Available Nodes
 
@@ -67,16 +67,19 @@ This creates an `authentication.json` file in your home directory (`~/.kumiho/`)
 Load assets from Kumiho Cloud using kref:// URIs or dropdown browsing.
 
 **Inputs:**
-- `input_mode`: Selection mode - "dropdown" or "kref_uri"
-- `space`: Space path to browse (dropdown mode)
-- `item_name`: Item to load (dropdown mode)
-- `kref_uri`: Direct kref:// URI (kref_uri mode)
-- `revision`: Revision to load ("latest", version number, or tag)
+- `project`: Project to load from (leave as auto to use the configured project)
+- `space`: Space path (e.g., "checkpoint/flux")
+- `item_name`: Item to load
+- `item_kind`: Item kind (image, video, checkpoint, etc.)
+- `kref_uri`: Direct kref:// URI (overrides the fields above)
+- `tag / revision`: Revision tag or number (blank = latest)
+- `artifact_name`: Artifact name (e.g., "preview")
+- `fallback_file_path`: Local file path if kref resolution fails
 
 **Outputs:**
-- `image`: The loaded image tensor
-- `kref`: The kref URI of the loaded asset
 - `file_path`: Resolved local file path
+- `kref`: The kref URI of the loaded asset
+- `metadata`: Metadata JSON for the resolved asset
 
 #### 🔹 Kumiho Save Image
 Save generated images to Kumiho Cloud as new revisions with automatic lineage tracking.
@@ -115,9 +118,11 @@ Save generated videos to Kumiho Cloud with inline preview support.
 Search for items across Kumiho projects and spaces using the SDK's `item_search()` function.
 
 **Inputs:**
-- `item_name_filter`: Filter by item name (supports wildcards like "hero*")
+- `project`: Project to search within (leave as auto to use the configured project)
+- `name_filter`: Filter by item name (supports wildcards like "hero*")
 - `kind_filter`: Filter by item kind (model, texture, workflow, etc.)
 - `context_filter`: Filter by project/space path (e.g., "project/*" or "*/characters/*")
+- `limit`: Maximum number of results to return
 
 **Outputs:**
 - `krefs`: List of matching item kref URIs (iterative)
@@ -167,32 +172,16 @@ The recommended way to authenticate is via the Kumiho CLI:
 
 ```bash
 # Login (opens browser for OAuth)
-kumiho-auth login
+kumiho-cli login
 
 # Check authentication status
-kumiho-auth status
+kumiho-cli whoami
 
 # Refresh token if expired
-kumiho-auth refresh
+kumiho-cli refresh
 ```
 
-This creates `~/.kumiho/authentication.json` which the SDK discovers automatically.
-
-### Environment Variables (Alternative)
-
-You can also use environment variables:
-
-```bash
-# Alternative to CLI authentication
-export KUMIHO_ACCESS_TOKEN="your_access_token_here"
-
-# Optional: Override default API endpoint
-export KUMIHO_API_ENDPOINT="https://api.kumiho.io"
-```
-
-### Node-Level Configuration
-
-Each node accepts an `api_endpoint` input for per-node configuration if needed.
+This creates `~/.kumiho/kumiho_authentication.json` which the SDK discovers automatically.
 
 ## Usage Examples
 
@@ -250,14 +239,14 @@ Examples:
 
 ## Python SDK Integration
 
-The Kumiho ComfyUI nodes use the [kumiho-python SDK](https://pypi.org/project/kumiho/) (v0.4.2+).
+The Kumiho ComfyUI nodes use the [kumiho-python SDK](https://pypi.org/project/kumiho/) (v0.7.0+).
 
 ```python
 import kumiho
 
 # Search for items
 items = kumiho.item_search(
-    item_name_filter="hero*",
+    name_filter="hero*",
     kind_filter="texture",
     context_filter="*/characters/*"
 )
@@ -275,19 +264,10 @@ For full API documentation, visit [docs.kumiho.io](https://docs.kumiho.io).
 
 ## Changelog
 
-### v0.4.2 (January 2025)
-- **KumihoSearchItems**: Now uses `kumiho.item_search()` with proper SDK integration
-- **KumihoSaveImage/Video**: Added optional `file_path` input for custom save locations
-- **UI Improvements**: Description fields changed to single-line input
-- **SDK v0.4.2**: Added `Item.project`, `Item.space` properties and `Kref.get_project()` method
-
-### v0.4.1
-- Fixed KumihoLoadAsset space path handling
-- Improved kref URI parsing
-
-### v0.4.0
-- Added inline video preview support
-- Automatic lineage tracking with DERIVED_FROM edges
+### Current
+- **KumihoLoadAsset**: Added project dropdown, space text input, and `tag / revision` handling with revision/artifact kref output
+- **KumihoSearchItems**: Added project selection to scope searches
+- **Docs**: Updated inputs, outputs, and SDK usage examples to match v0.7.0+
 
 ## Contributing
 
@@ -296,7 +276,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 ## Support
 
 - 📚 [Documentation](https://docs.kumiho.io)
-- 💬 [Discord Community](https://discord.gg/kumiho)
+- 💬 [Discord Community](https://discord.gg/Utp2P8G69P)
 - 🐛 [Issue Tracker](https://github.com/kumihoclouds/kumiho-comfyui/issues)
 - 📧 [Email Support](mailto:support@kumiho.io)
 
@@ -306,4 +286,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-Made with 🦊 by [Kumiho Clouds](https://kumiho.io)
+Made with 🦊 by [Kumiho](https://kumiho.io)
