@@ -1243,7 +1243,7 @@ class _KumihoSaveBase:
                     "timestamp": lineage['timestamp'],
                     "description": description,
                     "tags": tags,
-                    "workflow": workflow_json,  # Full workflow for reproducibility
+                    # "workflow": workflow_json,  # Removed to prevent metadata bloat and recursion
                     "seeds": seeds_json,  # Seeds for quick reference
                     # Generation settings for asset browser (top-level for easy access)
                     **gen_settings,
